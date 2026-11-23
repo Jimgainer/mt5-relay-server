@@ -6,14 +6,23 @@ import time
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
-TOKEN = os.environ.get("GRADLE_TOKEN", "")   # set this on the host; use a long random string
+TOKEN = os.environ.get("GRADLE_TOKEN", "")
 lock = threading.Lock()
-state = {}   # symbol -> command + what the EA last reported
+state = {}
 
 
 def slot(sym):
-    return state.setdefault(sym, {"version": 0, "cmd": "", "settings": {}, "seen": 0.0,
-                                  "applied": 0, "ea_state": "unknown"})
+    return state.setdefault(sym, {
+        "version": 0,
+        "cmd": "",
+        "settings": {},
+        "seen": 0.0,
+        "applied": 0,
+        "ea_state": "unknown",
+        "status_text": "Waiting for EA...",
+        "balance": 0.0,
+        "pnl": 0.0,
+    })
 
 
 @app.before_request
@@ -31,7 +40,7 @@ def health():
     return "ok"
 
 
-@app.post("/command")          # called by the phone app
+@app.post("/command")
 def command():
     d = request.get_json(silent=True) or {}
     cmd, sym = d.get("cmd"), str(d.get("symbol", "")).upper()
@@ -39,13 +48,13 @@ def command():
         return jsonify(error="bad request"), 400
     with lock:
         s = slot(sym)
-        s["version"] = max(s["version"] + 1, int(time.time()))   # stays increasing across restarts
+        s["version"] = max(s["version"] + 1, int(time.time()))
         s["cmd"] = cmd
         s["settings"] = d.get("settings", {})
         return jsonify(version=s["version"])
 
 
-@app.get("/poll")              # called by the EA every few seconds
+@app.get("/poll")
 def poll():
     sym = request.args.get("symbol", "").upper()
     with lock:
@@ -53,13 +62,32 @@ def poll():
         s["seen"] = time.time()
         s["applied"] = int(request.args.get("applied", s["applied"]))
         s["ea_state"] = request.args.get("state", s["ea_state"])
+        if "statusText" in request.args:
+            s["status_text"] = request.args.get("statusText", s["status_text"])
+        if "balance" in request.args:
+            try:
+                s["balance"] = float(request.args.get("balance", s["balance"]))
+            except ValueError:
+                pass
+        if "pnl" in request.args:
+            try:
+                s["pnl"] = float(request.args.get("pnl", s["pnl"]))
+            except ValueError:
+                pass
         return jsonify({"version": s["version"], "cmd": s["cmd"], **s["settings"]})
 
 
-@app.get("/status")            # called by the app to see if MT5 really applied it
+@app.get("/status")
 def status():
     sym = request.args.get("symbol", "").upper()
     with lock:
         s = slot(sym)
-        return jsonify(version=s["version"], applied=s["applied"],
-                       eaOnline=(time.time() - s["seen"]) < 20, state=s["ea_state"])
+        return jsonify(
+            version=s["version"],
+            applied=s["applied"],
+            eaOnline=(time.time() - s["seen"]) < 20,
+            state=s["ea_state"],
+            statusText=s["status_text"],
+            balance=s["balance"],
+            pnl=s["pnl"],
+        )
